@@ -1,0 +1,39 @@
+<?php
+
+namespace MonkeysLegion\Entity\Scanner;
+
+use Attribute;
+use ReflectionClass;
+
+#[Attribute(Attribute::TARGET_CLASS)]
+final class Entity {}
+
+final class EntityScanner
+{
+    public function scanDir(string $dir): array
+    {
+        $entities = [];
+        foreach (new \RecursiveIteratorIterator(
+                     new \RecursiveDirectoryIterator($dir)
+                 ) as $file) {
+            if ($file->getExtension() !== 'php') continue;
+            $class = $this->classFromPath($file->getPathname());
+            if (!$class) continue;
+
+            $ref = new ReflectionClass($class);
+            if ($ref->isAbstract()) continue;
+            if ($ref->getAttributes(Entity::class)) {
+                $entities[] = $ref;
+            }
+        }
+        return $entities;
+    }
+
+    private function classFromPath(string $path): ?string
+    {
+        $contents = \file_get_contents($path);
+        if (!preg_match('/^namespace\s+(.+?);/m', $contents, $ns)) return null;
+        if (!preg_match('/^class\s+(\w+)/m', $contents, $cl)) return null;
+        return $ns[1] . '\\' . $cl[1];
+    }
+}
