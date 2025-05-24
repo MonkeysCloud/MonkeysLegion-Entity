@@ -4,12 +4,23 @@ namespace MonkeysLegion\Entity\Scanner;
 
 use Attribute;
 use ReflectionClass;
+use ReflectionException;
 
 #[Attribute(Attribute::TARGET_CLASS)]
 final class Entity {}
 
 final class EntityScanner
 {
+
+    /**
+     * Scans the given directory for PHP files and returns an array of ReflectionClass objects
+     * that have the Entity attribute.
+     *
+     * @param string $dir Directory to scan for PHP files
+     *
+     * @return ReflectionClass[] A
+     * @throws ReflectionException
+     */
     public function scanDir(string $dir): array
     {
         $entities = [];
