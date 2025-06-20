@@ -2,12 +2,9 @@
 
 namespace MonkeysLegion\Entity\Scanner;
 
-use Attribute;
+use MonkeysLegion\Entity\Attributes\Entity as EntityAttr;
 use ReflectionClass;
 use ReflectionException;
-
-#[Attribute(Attribute::TARGET_CLASS)]
-final class Entity {}
 
 final class EntityScanner
 {
@@ -33,7 +30,7 @@ final class EntityScanner
 
             $ref = new ReflectionClass($class);
             if ($ref->isAbstract()) continue;
-            if ($ref->getAttributes(Entity::class)) {
+            if ($ref->getAttributes(EntityAttr::class)) {
                 $entities[] = $ref;
             }
         }
