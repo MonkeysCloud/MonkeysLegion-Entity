@@ -17,6 +17,7 @@ use Attribute;
  *       unique: false,
  *       unsigned: false,
  *       autoIncrement: false,
+ *       primaryKey: false,
  *       precision: null,
  *       scale: null,
  *       comment: null
