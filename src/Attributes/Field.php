@@ -87,6 +87,20 @@ use Attribute;
 #[Attribute(Attribute::TARGET_PROPERTY)]
 final class Field
 {
+
+    /**
+     * @param string      $type         The data type of the field (e.g., 'string', 'integer').
+     * @param int|null    $length       Optional length for string types.
+     * @param int|null    $precision    Optional precision for decimal types.
+     * @param int|null    $scale        Optional scale for decimal types.
+     * @param bool        $nullable     Whether the field can be NULL.
+     * @param mixed       $default      Default value for the field.
+     * @param bool        $unique       Whether the field should be unique.
+     * @param bool        $unsigned     Whether the field is unsigned (for integer types).
+     * @param bool        $autoIncrement Whether the field is an auto-incrementing primary key.
+     * @param bool        $primaryKey   Whether the field is a primary key.
+     * @param string|null $comment      Optional comment for the field.
+     */
     public function __construct(
         public string      $type,
         public ?int        $length        = null,
@@ -97,6 +111,7 @@ final class Field
         public bool        $unique        = false,
         public bool        $unsigned      = false,
         public bool        $autoIncrement = false,
+        public bool        $primaryKey    = false,
         public ?string     $comment       = null,
     ) {}
 }
