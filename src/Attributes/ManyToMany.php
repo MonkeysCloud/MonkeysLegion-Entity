@@ -7,7 +7,7 @@ use Attribute;
 
 /**
  * Many-to-Many relationship.
- * @usage #[ManyToMany(targetEntity: Tag::class, mappedBy: 'posts', joinTable: new JoinTable(...))]
+ * @usage #[ManyToMany(targetEntity: Tag::class, mappedBy: 'posts', joinTable: new JoinTable(...), nullable: true)]
  */
 #[Attribute(Attribute::TARGET_PROPERTY)]
 final class ManyToMany
@@ -17,5 +17,6 @@ final class ManyToMany
         public ?string       $mappedBy    = null,
         public ?string       $inversedBy  = null,
         public ?JoinTable    $joinTable   = null,
+        public bool          $nullable    = true,
     ) {}
 }
