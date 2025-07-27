@@ -3,28 +3,24 @@
 namespace MonkeysLegion\Entity;
 
 use ReflectionClass;
-use ReflectionProperty;
-use MonkeysLegion\Entity\Attributes\Field as FieldAttr;
+use ReflectionNamedType;
+use DateTimeImmutable;
+use DateTimeZone;
 
 final class Hydrator
 {
     /**
-     * Hydrates an object of the given class with the provided row data.
-     *
-     * @param class-string $class
-     *   The fully qualified class name of the object to hydrate.
-     * @param array<string,mixed> $row
-     *   An associative array where keys are property names and values are the corresponding values to set.
-     * @return object
-     *   An instance of the specified class with properties set according to the provided row data.
-     * @throws \ReflectionException
-     * @throws \DateMalformedStringException
-     */
+    * Hydrates an object of the given class with data from the provided row.
+    *
+    * @param class-string $class The class name to hydrate.
+    * @param array<string,mixed> $row The data to use for hydration.
+    * @return object An instance of the specified class populated with the data.
+    * @throws \ReflectionException|\DateMalformedStringException If the class does not exist or cannot be reflected.
+    */
     public static function hydrate(string $class, array $row): object
     {
-        // Create a new instance without invoking any constructor logic
-        $ref   = new ReflectionClass($class);
-        $obj   = $ref->newInstanceWithoutConstructor() ?: new $class();
+        $ref = new ReflectionClass($class);
+        $obj = $ref->newInstance();
 
         foreach ($row as $col => $val) {
             if (! $ref->hasProperty($col)) {
@@ -35,39 +31,47 @@ final class Hydrator
             $prop->setAccessible(true);
 
             $value = $val;
+            $type  = $prop->getType();
 
-            // Convert based on #[Field(type: ...)] metadata
-            $attrs = $prop->getAttributes(FieldAttr::class);
-            if ($attrs && $value !== null) {
-                /** @var FieldAttr $fmeta */
-                $fmeta = $attrs[0]->newInstance();
-                $type  = strtolower($fmeta->type ?? '');
+            if ($type instanceof ReflectionNamedType && $val !== null) {
+                $rawType = ltrim($type->getName(), '\\');        // e.g. "DateTimeImmutable"
+                $lc      = strtolower($rawType);                 // e.g. "datetimeimmutable"
 
-                // Numeric integer types
-                if (in_array($type, ['integer','tinyint','smallint','bigint','unsignedbigint','year'], true)) {
-                    $value = (int) $value;
+                // --- Date / time ---------------------------------------------------
+                if ($rawType === DateTimeImmutable::class || $lc === 'datetime' || $lc === 'datetimeimmutable') {
+                    $value = new DateTimeImmutable((string)$val, new DateTimeZone('UTC'));
+                } elseif ($lc === 'datetimetz') {
+                    $value = new DateTimeImmutable((string)$val); // already tz'ed string
+                } elseif ($lc === 'timestamp' || $lc === 'timestamptz') {
+                    $ts    = is_numeric($val) ? (int)$val : strtotime((string)$val);
+                    $value = new DateTimeImmutable("@$ts")->setTimezone(new DateTimeZone('UTC'));
+                } elseif ($lc === 'date') {
+                    $value = new DateTimeImmutable($val . ' 00:00:00', new DateTimeZone('UTC'));
+                } elseif ($lc === 'time') {
+                    $value = new DateTimeImmutable(date('Y-m-d') . ' ' . $val, new DateTimeZone('UTC'));
                 }
-                // Floating point and decimals
-                elseif (in_array($type, ['float','double','decimal'], true)) {
-                    $value = is_numeric($value) ? (float) $value : $value;
+                // --- integers ------------------------------------------------------
+                elseif (in_array($lc, ['int','integer','bigint','smallint','tinyint','unsignedbigint'], true)) {
+                    $value = (int)$val;
                 }
-                // Boolean types
-                elseif (in_array($type, ['boolean','bool'], true)) {
-                    $value = (bool) $value;
+                // --- floats/decimal ------------------------------------------------
+                elseif (in_array($lc, ['float','double','decimal'], true)) {
+                    $value = is_numeric($val) ? (float)$val : $val;
                 }
-                // Date/time types → DateTimeImmutable
-                elseif (in_array($type, ['date','time','datetime','datetimetz','timestamp','timestamptz'], true)) {
-                    $value = new \DateTimeImmutable($value, new \DateTimeZone('UTC'));
+                // --- boolean -------------------------------------------------------
+                elseif (in_array($lc, ['bool','boolean'], true)) {
+                    $value = (bool)$val;
                 }
-                // JSON
-                elseif (in_array($type, ['json','simple_json'], true)) {
-                    $value = json_decode($value, true);
+                // --- json ----------------------------------------------------------
+                elseif (in_array($lc, ['json','simple_json'], true)) {
+                    $decoded = json_decode((string)$val, true);
+                    $value   = $decoded !== null ? $decoded : null;
                 }
-                // Simple array (comma-separated)
-                elseif ($type === 'simple_array') {
-                    $value = explode(',', $value);
+                // --- arrays ---------------------------------------------------------
+                elseif (in_array($lc, ['array','simple_array'], true)) {
+                    $value = is_string($val) ? array_values(array_filter($val === '' ? [] : explode(',', $val))) : (array)$val;
                 }
-                // Otherwise, leave as raw string or binary
+                // others: leave as-is (string, text, enum, set, etc.)
             }
 
             $prop->setValue($obj, $value);
