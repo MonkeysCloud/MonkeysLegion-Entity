@@ -10,17 +10,22 @@ use DateTimeZone;
 final class Hydrator
 {
     /**
-    * Hydrates an object of the given class with data from the provided row.
-    *
-    * @param class-string $class The class name to hydrate.
-    * @param array<string,mixed> $row The data to use for hydration.
-    * @return object An instance of the specified class populated with the data.
-    * @throws \ReflectionException|\DateMalformedStringException If the class does not exist or cannot be reflected.
-    */
-    public static function hydrate(string $class, array $row): object
+     * Hydrates an object of the given class with data from the provided row.
+     *
+     * @param class-string $class The class name to hydrate.
+     * @param array<string,mixed>|object $row The data to use for hydration.
+     * @return object An instance of the specified class populated with the data.
+     * @throws \ReflectionException|\DateMalformedStringException If the class does not exist or cannot be reflected.
+     */
+    public static function hydrate(string $class, array|object $row): object
     {
         $ref = new ReflectionClass($class);
         $obj = $ref->newInstance();
+
+        // Convert object to array if needed (for stdClass from PDO)
+        if (is_object($row)) {
+            $row = (array) $row;
+        }
 
         foreach ($row as $col => $val) {
             if (! $ref->hasProperty($col)) {
@@ -69,14 +74,130 @@ final class Hydrator
                 }
                 // --- arrays ---------------------------------------------------------
                 elseif (in_array($lc, ['array','simple_array'], true)) {
-                    $value = is_string($val) ? array_values(array_filter($val === '' ? [] : explode(',', $val))) : (array)$val;
+                    // First check if it's a JSON string
+                    if (is_string($val)) {
+                        // Try to decode as JSON first
+                        $trimmedVal = trim($val);
+                        if ($trimmedVal !== '' && (str_starts_with($trimmedVal, '[') || str_starts_with($trimmedVal, '{'))) {
+                            $decoded = json_decode($trimmedVal, true);
+                            if (json_last_error() === JSON_ERROR_NONE) {
+                                $value = $decoded;
+                            } else {
+                                // Fallback to comma-separated values
+                                $value = array_values(array_filter($val === '' ? [] : explode(',', $val)));
+                            }
+                        } else {
+                            // Treat as comma-separated values
+                            $value = array_values(array_filter($val === '' ? [] : explode(',', $val)));
+                        }
+                    } else {
+                        $value = (array)$val;
+                    }
                 }
-                // others: leave as-is (string, text, enum, set, etc.)
+                // --- string (explicit handling for potential JSON in string fields) ---
+                elseif ($lc === 'string' || $lc === 'text') {
+                    // Keep as string, but you might want to check for JSON fields here
+                    // based on property name patterns (e.g., fields ending with '_json')
+                    $value = (string)$val;
+                }
+                // others: leave as-is (enum, set, etc.)
+            }
+            // Handle nullable types with null values
+            elseif ($val === null && $type && $type->allowsNull()) {
+                $value = null;
             }
 
             $prop->setValue($obj, $value);
         }
 
         return $obj;
+    }
+
+    /**
+     * Extract data from an entity for persistence.
+     * This is the reverse of hydrate - converts entity properties to database values.
+     *
+     * @param object $entity The entity to extract data from
+     * @param array<string> $fields Optional list of fields to extract (if empty, extracts all)
+     * @return array<string,mixed> The extracted data
+     */
+    public static function extract(object $entity, array $fields = []): array
+    {
+        $ref = new ReflectionClass($entity);
+        $data = [];
+
+        $properties = empty($fields)
+            ? $ref->getProperties()
+            : array_map(fn($f) => $ref->getProperty($f), $fields);
+
+        foreach ($properties as $prop) {
+            $prop->setAccessible(true);
+
+            if (!$prop->isInitialized($entity)) {
+                continue;
+            }
+
+            $name = $prop->getName();
+            $value = $prop->getValue($entity);
+            $type = $prop->getType();
+
+            // Convert PHP values to database-friendly formats
+            if ($value === null) {
+                $data[$name] = null;
+            } elseif ($value instanceof DateTimeImmutable || $value instanceof \DateTime) {
+                $data[$name] = $value->format('Y-m-d H:i:s');
+            } elseif (is_bool($value)) {
+                $data[$name] = $value ? 1 : 0;
+            } elseif (is_array($value)) {
+                // Check if this should be JSON or comma-separated
+                if ($type instanceof ReflectionNamedType) {
+                    $typeName = strtolower($type->getName());
+                    if (in_array($typeName, ['json', 'simple_json'], true)) {
+                        $data[$name] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    } elseif (in_array($typeName, ['simple_array'], true)) {
+                        $data[$name] = implode(',', $value);
+                    } else {
+                        // Default to JSON for array types
+                        $data[$name] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    }
+                } else {
+                    // Default to JSON
+                    $data[$name] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                }
+            } elseif (is_float($value)) {
+                // Preserve precision for DECIMAL columns
+                $data[$name] = (string)$value;
+            } else {
+                $data[$name] = $value;
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Check if a string is valid JSON
+     *
+     * @param mixed $string The value to check
+     * @return bool True if the string is valid JSON
+     */
+    private static function isJson(mixed $string): bool
+    {
+        if (!is_string($string)) {
+            return false;
+        }
+
+        $trimmed = trim($string);
+        if ($trimmed === '') {
+            return false;
+        }
+
+        // Quick check for JSON-like structure
+        if (!str_starts_with($trimmed, '[') && !str_starts_with($trimmed, '{')) {
+            return false;
+        }
+
+        json_decode($trimmed);
+        return json_last_error() === JSON_ERROR_NONE;
     }
 }
