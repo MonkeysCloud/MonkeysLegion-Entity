@@ -6,6 +6,7 @@ use ReflectionClass;
 use ReflectionNamedType;
 use DateTimeImmutable;
 use DateTimeZone;
+use ReflectionProperty;
 
 final class Hydrator
 {
@@ -56,24 +57,24 @@ final class Hydrator
                     $value = new DateTimeImmutable(date('Y-m-d') . ' ' . $val, new DateTimeZone('UTC'));
                 }
                 // --- integers ------------------------------------------------------
-                elseif (in_array($lc, ['int','integer','bigint','smallint','tinyint','unsignedbigint'], true)) {
+                elseif (in_array($lc, ['int', 'integer', 'bigint', 'smallint', 'tinyint', 'unsignedbigint'], true)) {
                     $value = (int)$val;
                 }
                 // --- floats/decimal ------------------------------------------------
-                elseif (in_array($lc, ['float','double','decimal'], true)) {
+                elseif (in_array($lc, ['float', 'double', 'decimal'], true)) {
                     $value = is_numeric($val) ? (float)$val : $val;
                 }
                 // --- boolean -------------------------------------------------------
-                elseif (in_array($lc, ['bool','boolean'], true)) {
+                elseif (in_array($lc, ['bool', 'boolean'], true)) {
                     $value = (bool)$val;
                 }
                 // --- json ----------------------------------------------------------
-                elseif (in_array($lc, ['json','simple_json'], true)) {
+                elseif (in_array($lc, ['json', 'simple_json'], true)) {
                     $decoded = json_decode((string)$val, true);
                     $value   = $decoded !== null ? $decoded : null;
                 }
                 // --- arrays ---------------------------------------------------------
-                elseif (in_array($lc, ['array','simple_array'], true)) {
+                elseif (in_array($lc, ['array', 'simple_array'], true)) {
                     // First check if it's a JSON string
                     if (is_string($val)) {
                         // Try to decode as JSON first
@@ -107,7 +108,7 @@ final class Hydrator
                 $value = null;
             }
 
-            $prop->setValue($obj, $value);
+            self::safeSetProperty($prop, $obj, $value);
         }
 
         return $obj;
@@ -199,5 +200,44 @@ final class Hydrator
 
         json_decode($trimmed);
         return json_last_error() === JSON_ERROR_NONE;
+    }
+
+    /**
+     * Check if a property type allows null values
+     */
+    private static function isPropertyNullable(ReflectionProperty $prop): bool
+    {
+        $type = $prop->getType();
+        if (!$type) return true; // No type hint = nullable
+
+        if ($type instanceof \ReflectionUnionType) {
+            foreach ($type->getTypes() as $unionType) {
+                if ($unionType instanceof \ReflectionNamedType && $unionType->getName() === 'null') {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if ($type instanceof \ReflectionNamedType) {
+            return $type->allowsNull();
+        }
+
+        return true; // Default to nullable for safety
+    }
+
+    /**
+     * Safely set a property value, respecting nullability constraints
+     */
+    private static function safeSetProperty(ReflectionProperty $prop, object $entity, mixed $value): void
+    {
+        $prop->setAccessible(true);
+
+        if ($value === null && !self::isPropertyNullable($prop)) {
+            // Don't set non-nullable properties to null - leave them uninitialized
+            return;
+        }
+
+        $prop->setValue($entity, $value);
     }
 }
