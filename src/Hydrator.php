@@ -34,7 +34,6 @@ final class Hydrator
             }
 
             $prop = $ref->getProperty($col);
-            $prop->setAccessible(true);
 
             $value = $val;
             $type  = $prop->getType();
@@ -121,6 +120,8 @@ final class Hydrator
             self::safeSetProperty($prop, $obj, $value);
         }
 
+        \MonkeysLegion\Entity\Observers\LifecycleDispatcher::dispatch('hydrated', $obj);
+
         return $obj;
     }
 
@@ -142,8 +143,6 @@ final class Hydrator
             : array_map(fn($f) => $ref->getProperty($f), $fields);
 
         foreach ($properties as $prop) {
-            $prop->setAccessible(true);
-
             if (!$prop->isInitialized($entity)) {
                 continue;
             }
