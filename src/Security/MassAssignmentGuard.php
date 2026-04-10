@@ -30,6 +30,8 @@ use ReflectionClass;
  */
 final class MassAssignmentGuard
 {
+    /** @var array<class-string, \ReflectionClass<object>> */
+    private static array $reflectionCache = [];
     /**
      * Fill an entity with the given data, respecting mass-assignment rules.
      *
@@ -51,7 +53,7 @@ final class MassAssignmentGuard
         // Determine allowed fields
         $allowed = self::resolveAllowed($meta, $context);
 
-        $ref = new ReflectionClass($entity);
+        $ref = self::$reflectionCache[$entity::class] ??= new ReflectionClass($entity);
 
         foreach ($data as $field => $value) {
             if (!in_array($field, $allowed, true)) {

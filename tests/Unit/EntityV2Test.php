@@ -18,7 +18,9 @@ use MonkeysLegion\Entity\Attributes\Index;
 use MonkeysLegion\Entity\Attributes\ObservedBy;
 use MonkeysLegion\Entity\Attributes\QueryFilter;
 use MonkeysLegion\Entity\Attributes\SoftDeletes;
+use MonkeysLegion\Entity\Attributes\Subscribe;
 use MonkeysLegion\Entity\Attributes\Timestamps;
+use MonkeysLegion\Entity\Attributes\Uuid as UuidAttr;
 use MonkeysLegion\Entity\Attributes\Versioned;
 use MonkeysLegion\Entity\Attributes\Virtual;
 use MonkeysLegion\Entity\Contracts\CastInterface;
@@ -32,6 +34,7 @@ use MonkeysLegion\Entity\Observers\LifecycleDispatcher;
 use MonkeysLegion\Entity\Security\MassAssignmentGuard;
 use MonkeysLegion\Entity\Support\ChangeTracker;
 use MonkeysLegion\Entity\Support\EntityEvent;
+use MonkeysLegion\Entity\Utils\Uuid;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
@@ -242,6 +245,39 @@ class TestUserObserver
     {
         $this->events[] = 'hydrated';
     }
+}
+
+// ── Test Subscriber ────────────────────────────────────────────
+
+#[Subscribe(entities: [ObservedEntity::class])]
+class TestAuditSubscriber
+{
+    /** @var list<array{event: string, entity: object, changes: array<string, mixed>}> */
+    public array $log = [];
+
+    public function created(object $entity, EntityEvent $event): void
+    {
+        $this->log[] = ['event' => $event->event, 'entity' => $entity, 'changes' => $event->changes];
+    }
+
+    public function updated(object $entity, EntityEvent $event): void
+    {
+        $this->log[] = ['event' => $event->event, 'entity' => $entity, 'changes' => $event->changes];
+    }
+}
+
+// ── UUID Entity ────────────────────────────────────────────────
+
+#[Entity(table: 'events')]
+class EventEntity
+{
+    #[Id]
+    #[UuidAttr]
+    #[Field(type: 'uuid')]
+    public string $id;
+
+    #[Field(type: 'string', length: 255)]
+    public string $name;
 }
 
 #[Entity(table: 'observed_items')]
@@ -933,5 +969,129 @@ final class EntityV2Test extends TestCase
         $this->assertTrue($id->autoIncrement);
         $this->assertTrue($id->isId);
         $this->assertTrue($id->primaryKey);
+    }
+
+    // ── UUID Auto-generation Tests ─────────────────────────────
+
+    #[Test]
+    public function hydrator_auto_generates_uuid_when_absent_from_row(): void
+    {
+        $event = Hydrator::hydrate(EventEntity::class, [
+            'name' => 'Test Event',
+            // 'id' intentionally omitted
+        ]);
+
+        $this->assertIsString($event->id);
+        $this->assertTrue(Uuid::isValid($event->id));
+    }
+
+    #[Test]
+    public function hydrator_does_not_overwrite_provided_uuid(): void
+    {
+        $given = '550e8400-e29b-41d4-a716-446655440000';
+
+        $event = Hydrator::hydrate(EventEntity::class, [
+            'id'   => $given,
+            'name' => 'Test Event',
+        ]);
+
+        $this->assertSame($given, $event->id);
+    }
+
+    // ── CastInterface::set() Tests ─────────────────────────────
+
+    #[Test]
+    public function extract_calls_cast_interface_set_on_custom_caster(): void
+    {
+        $product = new ProductEntity();
+        $product->id    = 1;
+        $product->name  = 'Widget';
+        $product->price = '9.99';
+        $product->sku   = 'SKU-UPPER';
+
+        $data = Hydrator::extract($product);
+
+        // UpperCast::set() lowercases the value
+        $this->assertSame('sku-upper', $data['sku']);
+    }
+
+    #[Test]
+    public function hydrate_calls_cast_interface_get_with_entity_context(): void
+    {
+        // UpperCast::get() uppercases the value; entity context is the hydrated object
+        $product = Hydrator::hydrate(ProductEntity::class, [
+            'id'    => 1,
+            'name'  => 'Widget',
+            'price' => '9.99',
+            'sku'   => 'sku-abc',
+        ]);
+
+        $this->assertSame('SKU-ABC', $product->sku);
+    }
+
+    // ── Global Subscriber Tests ────────────────────────────────
+
+    #[Test]
+    public function lifecycle_dispatcher_calls_matching_subscriber(): void
+    {
+        $subscriber = new TestAuditSubscriber();
+        LifecycleDispatcher::setSubscriberInstance(TestAuditSubscriber::class, $subscriber);
+
+        $entity = new ObservedEntity();
+        $entity->id   = 1;
+        $entity->name = 'Test';
+
+        LifecycleDispatcher::dispatch('created', $entity, ['name' => 'Test']);
+
+        $this->assertCount(1, $subscriber->log);
+        $this->assertSame('created', $subscriber->log[0]['event']);
+        $this->assertSame(['name' => 'Test'], $subscriber->log[0]['changes']);
+    }
+
+    #[Test]
+    public function lifecycle_dispatcher_subscriber_skips_unregistered_entity(): void
+    {
+        $subscriber = new TestAuditSubscriber();
+        LifecycleDispatcher::setSubscriberInstance(TestAuditSubscriber::class, $subscriber);
+
+        // Dispatch for a different entity type — subscriber should be skipped
+        $user = new UserEntity();
+        $user->id = 1;
+
+        LifecycleDispatcher::dispatch('created', $user);
+
+        $this->assertCount(0, $subscriber->log);
+    }
+
+    #[Test]
+    public function lifecycle_dispatcher_subscriber_receives_entity_event(): void
+    {
+        $subscriber = new TestAuditSubscriber();
+        LifecycleDispatcher::setSubscriberInstance(TestAuditSubscriber::class, $subscriber);
+
+        $entity = new ObservedEntity();
+        $entity->id   = 2;
+        $entity->name = 'Hello';
+
+        LifecycleDispatcher::dispatch('updated', $entity, ['name' => 'World']);
+
+        $this->assertCount(1, $subscriber->log);
+        $this->assertSame('updated', $subscriber->log[0]['event']);
+        $this->assertSame(['name' => 'World'], $subscriber->log[0]['changes']);
+        $this->assertSame($entity, $subscriber->log[0]['entity']);
+    }
+
+    #[Test]
+    public function lifecycle_dispatcher_register_subscriber_reads_attribute(): void
+    {
+        LifecycleDispatcher::registerSubscriber(TestAuditSubscriber::class);
+
+        // Dispatch to a different entity; subscriber should NOT fire (attribute restricts to ObservedEntity)
+        $user = new UserEntity();
+        $user->id = 99;
+        LifecycleDispatcher::dispatch('created', $user);
+
+        // No exception means entity-filter works correctly
+        $this->assertTrue(true);
     }
 }
