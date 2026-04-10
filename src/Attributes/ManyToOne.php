@@ -6,15 +6,32 @@ namespace MonkeysLegion\Entity\Attributes;
 use Attribute;
 
 /**
- * Many-to-One relationship.
- * @usage #[ManyToOne(targetEntity: Post::class, inversedBy: 'comments', nullable: true)]
+ * MonkeysLegion Framework — Entity Package
+ *
+ * Many-to-One relationship definition.
+ *
+ * ```php
+ * #[Entity(table: 'comments')]
+ * class Comment {
+ *     #[ManyToOne(targetEntity: Post::class, inversedBy: 'comments')]
+ *     public Post $post;
+ * }
+ * ```
+ *
+ * @copyright 2026 MonkeysCloud Team
+ * @license   MIT
  */
 #[Attribute(Attribute::TARGET_PROPERTY)]
 final class ManyToOne
 {
+    /**
+     * @param class-string $targetEntity Target entity class.
+     * @param string|null  $inversedBy   Property on the target that maps the inverse side.
+     * @param bool         $nullable     Whether the FK column allows NULL.
+     */
     public function __construct(
-        public string  $targetEntity,
-        public ?string $inversedBy = null,
-        public bool    $nullable   = true,
+        public readonly string $targetEntity,
+        public readonly ?string $inversedBy = null,
+        public readonly bool $nullable = true,
     ) {}
 }
