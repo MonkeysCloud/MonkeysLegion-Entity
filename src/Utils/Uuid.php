@@ -1,13 +1,23 @@
 <?php
-
 declare(strict_types=1);
 
 namespace MonkeysLegion\Entity\Utils;
 
+/**
+ * MonkeysLegion Framework — Entity Package
+ *
+ * UUID v4 generator and validator utility.
+ *
+ * Used by the entity layer to auto-generate UUID primary keys when
+ * a property is marked with #[Uuid].
+ *
+ * @copyright 2026 MonkeysCloud Team
+ * @license   MIT
+ */
 final class Uuid
 {
     /**
-     * Generate a random UUID v4
+     * Generate a cryptographically secure random UUID v4.
      */
     public static function v4(): string
     {
@@ -22,10 +32,13 @@ final class Uuid
     }
 
     /**
-     * Validate if a string is a valid UUID
+     * Validate whether a string is a valid UUID format.
      */
     public static function isValid(string $uuid): bool
     {
-        return (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $uuid);
+        return (bool) preg_match(
+            '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i',
+            $uuid,
+        );
     }
 }

@@ -1,226 +1,464 @@
 <?php
+declare(strict_types=1);
 
 namespace MonkeysLegion\Entity;
 
-use ReflectionClass;
-use ReflectionNamedType;
 use DateTimeImmutable;
 use DateTimeZone;
+use MonkeysLegion\Entity\Contracts\CastInterface;
+use MonkeysLegion\Entity\Metadata\EntityMetadata;
+use MonkeysLegion\Entity\Metadata\FieldMetadata;
+use MonkeysLegion\Entity\Metadata\MetadataRegistry;
+use MonkeysLegion\Entity\Observers\LifecycleDispatcher;
+use MonkeysLegion\Entity\Utils\Uuid;
+use ReflectionClass;
 use ReflectionProperty;
 
+/**
+ * MonkeysLegion Framework — Entity Package
+ *
+ * High-performance entity hydrator and extractor.
+ *
+ * PHP 8.4 features used:
+ *  • Property hook awareness — uses direct assignment for hooked props
+ *  • Backed enum auto-casting via ::from()
+ *  • Static metadata cache via MetadataRegistry (zero reflection after boot)
+ *
+ * v2 improvements over v1:
+ *  • Cast pipeline (#[Cast] processed before raw type coercion)
+ *  • #[Hidden]-aware extraction
+ *  • #[Virtual] fields skipped during extract
+ *  • #[Timestamps] auto-injection
+ *  • toArray() / toJson() convenience methods
+ *
+ * @copyright 2026 MonkeysCloud Team
+ * @license   MIT
+ */
 final class Hydrator
 {
+    /** @var array<class-string, ReflectionClass<object>> */
+    private static array $reflectionCache = [];
+
+    /** @var array<string, CastInterface> */
+    private static array $castInstances = [];
+
+    // ── Hydration ──────────────────────────────────────────────
+
     /**
-     * Hydrates an object of the given class with data from the provided row.
+     * Hydrate an entity from a database row.
      *
-     * @param class-string $class The class name to hydrate.
-     * @param array<string,mixed>|object $row The data to use for hydration.
-     * @return object An instance of the specified class populated with the data.
-     * @throws \ReflectionException|\DateMalformedStringException If the class does not exist or cannot be reflected.
+     * @param class-string         $class
+     * @param array<string, mixed> $row
+     *
+     * @throws \ReflectionException
      */
     public static function hydrate(string $class, array|object $row): object
     {
-        $ref = new ReflectionClass($class);
-        $obj = $ref->newInstance();
+        $ref  = self::reflect($class);
+        $meta = MetadataRegistry::for($class);
+        $obj  = $ref->newInstanceWithoutConstructor();
 
-        // Convert object to array if needed (for stdClass from PDO)
         if (is_object($row)) {
             $row = (array) $row;
         }
 
+        // Build column→property map for #[Column(name: ...)] support
+        $columnMap = $meta->columnToPropertyMap();
+
         foreach ($row as $col => $val) {
-            if (! $ref->hasProperty($col)) {
+            // Resolve DB column name to PHP property name
+            $propName = $columnMap[$col] ?? $col;
+
+            if (!$ref->hasProperty($propName)) {
                 continue;
             }
 
-            $prop = $ref->getProperty($col);
+            $fieldMeta = $meta->fields[$propName] ?? null;
+            $prop      = $ref->getProperty($propName);
+            $value     = self::castValue($val, $prop, $fieldMeta, $obj);
 
-            $value = $val;
-            $type  = $prop->getType();
-
-            if ($type instanceof ReflectionNamedType && $val !== null) {
-                $rawType = ltrim($type->getName(), '\\');        // e.g. "DateTimeImmutable"
-                $lc      = strtolower($rawType);                 // e.g. "datetimeimmutable"
-
-                // --- Date / time ---------------------------------------------------
-                if ($rawType === DateTimeImmutable::class || $lc === 'datetime' || $lc === 'datetimeimmutable') {
-                    $value = new DateTimeImmutable((string)$val, new DateTimeZone('UTC'));
-                } elseif ($lc === 'datetimetz') {
-                    $value = new DateTimeImmutable((string)$val); // already tz'ed string
-                } elseif ($lc === 'timestamp' || $lc === 'timestamptz') {
-                    $ts    = is_numeric($val) ? (int)$val : strtotime((string)$val);
-                    $value = new DateTimeImmutable("@$ts")->setTimezone(new DateTimeZone('UTC'));
-                } elseif ($lc === 'date') {
-                    $value = new DateTimeImmutable($val . ' 00:00:00', new DateTimeZone('UTC'));
-                } elseif ($lc === 'time') {
-                    $value = new DateTimeImmutable(date('Y-m-d') . ' ' . $val, new DateTimeZone('UTC'));
-                }
-                // --- integers ------------------------------------------------------
-                elseif (in_array($lc, ['int', 'integer', 'bigint', 'smallint', 'tinyint', 'unsignedbigint'], true)) {
-                    $value = (int)$val;
-                }
-                // --- floats/decimal ------------------------------------------------
-                elseif (in_array($lc, ['float', 'double', 'decimal'], true)) {
-                    $value = is_numeric($val) ? (float)$val : $val;
-                }
-                // --- boolean -------------------------------------------------------
-                elseif (in_array($lc, ['bool', 'boolean'], true)) {
-                    $value = (bool)$val;
-                }
-                // --- json ----------------------------------------------------------
-                elseif (in_array($lc, ['json', 'simple_json'], true)) {
-                    $decoded = json_decode((string)$val, true);
-                    $value   = $decoded !== null ? $decoded : null;
-                }
-                // --- arrays ---------------------------------------------------------
-                elseif (in_array($lc, ['array', 'simple_array'], true)) {
-                    // First check if it's a JSON string
-                    if (is_string($val)) {
-                        // Try to decode as JSON first
-                        $trimmedVal = trim($val);
-                        if ($trimmedVal !== '' && (str_starts_with($trimmedVal, '[') || str_starts_with($trimmedVal, '{'))) {
-                            $decoded = json_decode($trimmedVal, true);
-                            if (json_last_error() === JSON_ERROR_NONE) {
-                                $value = $decoded;
-                            } else {
-                                // Fallback to comma-separated values
-                                $value = array_values(array_filter($val === '' ? [] : explode(',', $val)));
-                            }
-                        } else {
-                            // Treat as comma-separated values
-                            $value = array_values(array_filter($val === '' ? [] : explode(',', $val)));
-                        }
-                    } else {
-                        $value = (array)$val;
-                    }
-                }
-                // --- enum/set ------------------------------------------------------
-                elseif (in_array($lc, ['enum', 'set'], true)) {
-                    // For enum: single value as string
-                    // For set: comma-separated values as string or array
-                    if ($lc === 'set' && is_string($val) && str_contains($val, ',')) {
-                        $value = explode(',', $val);
-                    } else {
-                        $value = (string)$val;
-                    }
-                }
-                // --- string (explicit handling for potential JSON in string fields) ---
-                elseif ($lc === 'string' || $lc === 'text') {
-                    // Keep as string, but you might want to check for JSON fields here
-                    // based on property name patterns (e.g., fields ending with '_json')
-                    $value = (string)$val;
-                }
-                // others: leave as-is (enum, set, etc.)
-            }
-            // Handle nullable types with null values
-            elseif ($val === null && $type && $type->allowsNull()) {
-                $value = null;
-            }
-
-            self::safeSetProperty($prop, $obj, $value);
+            self::assignProperty($prop, $obj, $value, $fieldMeta);
         }
 
-        \MonkeysLegion\Entity\Observers\LifecycleDispatcher::dispatch('hydrated', $obj);
+        LifecycleDispatcher::dispatch('hydrated', $obj);
 
         return $obj;
     }
 
     /**
-     * Extract data from an entity for persistence.
-     * This is the reverse of hydrate - converts entity properties to database values.
+     * Create a new entity instance with optional data and UUID auto-generation.
      *
-     * @param object $entity The entity to extract data from
-     * @param array<string> $fields Optional list of fields to extract (if empty, extracts all)
-     * @return array<string,mixed> The extracted data
+     * Unlike hydrate(), this method generates UUID values for uninitialized
+     * #[Uuid] fields — designed for INSERT flows, not DB row hydration.
+     *
+     * @param class-string         $class
+     * @param array<string, mixed> $data Optional initial data.
      */
-    public static function extract(object $entity, array $fields = []): array
+    public static function create(string $class, array $data = []): object
     {
-        $ref = new ReflectionClass($entity);
+        $ref  = self::reflect($class);
+        $meta = MetadataRegistry::for($class);
+        $obj  = $ref->newInstanceWithoutConstructor();
+
+        // Assign provided data
+        foreach ($data as $name => $val) {
+            if (!$ref->hasProperty($name)) {
+                continue;
+            }
+            $fieldMeta = $meta->fields[$name] ?? null;
+            $prop      = $ref->getProperty($name);
+            self::assignProperty($prop, $obj, $val, $fieldMeta);
+        }
+
+        // Auto-generate UUID v4 for uninitialized #[Uuid] fields
+        foreach ($meta->fields as $name => $fieldMeta) {
+            if (!$fieldMeta->isUuid || !$ref->hasProperty($name)) {
+                continue;
+            }
+            $prop = $ref->getProperty($name);
+            if (!$prop->isInitialized($obj)) {
+                $prop->setValue($obj, Uuid::v4());
+            }
+        }
+
+        LifecycleDispatcher::dispatch('creating', $obj);
+
+        return $obj;
+    }
+
+    // ── Extraction ─────────────────────────────────────────────
+
+    /**
+     * Extract data from an entity for persistence.
+     *
+     * @param object       $entity
+     * @param list<string> $fields       Optional subset of fields.
+     * @param bool         $includeHidden Whether to include #[Hidden] fields.
+     * @param bool         $forInsert    If true, auto-set created_at timestamp.
+     *
+     * @return array<string, mixed>
+     */
+    public static function extract(
+        object $entity,
+        array $fields = [],
+        bool $includeHidden = true,
+        bool $forInsert = false,
+    ): array {
+        $meta = MetadataRegistry::for($entity::class);
+        $ref  = self::reflect($entity::class);
         $data = [];
+        $now  = new DateTimeImmutable('now', new DateTimeZone('UTC'));
 
-        $properties = empty($fields)
-            ? $ref->getProperties()
-            : array_map(fn($f) => $ref->getProperty($f), $fields);
+        $targetFields = $fields !== []
+            ? $fields
+            : $meta->persistableFields();
 
-        foreach ($properties as $prop) {
+        foreach ($targetFields as $name) {
+            // Skip hidden in serialization mode
+            if (!$includeHidden && in_array($name, $meta->hidden, true)) {
+                continue;
+            }
+
+            if (!$ref->hasProperty($name)) {
+                continue;
+            }
+
+            $prop = $ref->getProperty($name);
             if (!$prop->isInitialized($entity)) {
                 continue;
             }
 
-            $name = $prop->getName();
-            $value = $prop->getValue($entity);
-            $type = $prop->getType();
+            $value     = $prop->getValue($entity);
+            $fieldMeta = $meta->fields[$name] ?? null;
 
-            // Convert PHP values to database-friendly formats
-            if ($value === null) {
-                $data[$name] = null;
-            } elseif ($value instanceof DateTimeImmutable || $value instanceof \DateTime) {
-                $data[$name] = $value->format('Y-m-d H:i:s');
-            } elseif (is_bool($value)) {
-                $data[$name] = $value ? 1 : 0;
-            } elseif (is_array($value)) {
-                // Check if this should be JSON or comma-separated
-                if ($type instanceof ReflectionNamedType) {
-                    $typeName = strtolower($type->getName());
-                    if (in_array($typeName, ['json', 'simple_json'], true)) {
-                        $data[$name] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                    } elseif (in_array($typeName, ['simple_array', 'set'], true)) {
-                        $data[$name] = implode(',', $value);
-                    } else {
-                        // Default to JSON for array types
-                        $data[$name] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                    }
-                } else {
-                    // Default to JSON
-                    $data[$name] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                }
-            } elseif (is_float($value)) {
-                // Preserve precision for DECIMAL columns
-                $data[$name] = (string)$value;
-            } else {
-                $data[$name] = $value;
+            // Use DB column name as key when #[Column(name: ...)] is set
+            $key         = $fieldMeta?->columnName ?? $name;
+            $data[$key]  = self::decastValue($value, $fieldMeta, $entity);
+        }
+
+        // Auto-inject timestamps
+        if ($meta->timestamps) {
+            if ($forInsert) {
+                $data[$meta->createdColumn] ??= $now->format('Y-m-d H:i:s');
             }
+            $data[$meta->updatedColumn] = $now->format('Y-m-d H:i:s');
+        }
+
+        return $data;
+    }
+
+    // ── Serialization ──────────────────────────────────────────
+
+    /**
+     * Convert an entity to an array, respecting #[Hidden] and including #[Virtual].
+     *
+     * @return array<string, mixed>
+     */
+    public static function toArray(object $entity): array
+    {
+        $meta = MetadataRegistry::for($entity::class);
+        $ref  = self::reflect($entity::class);
+        $data = [];
+
+        foreach ($meta->fields as $name => $fieldMeta) {
+            if ($fieldMeta->isHidden) {
+                continue;
+            }
+
+            if (!$ref->hasProperty($name)) {
+                continue;
+            }
+
+            $prop = $ref->getProperty($name);
+            if (!$prop->isInitialized($entity)) {
+                continue;
+            }
+
+            $value = $prop->getValue($entity);
+            $data[$name] = self::serializeValue($value);
         }
 
         return $data;
     }
 
     /**
-     * Check if a property type allows null values
+     * Convert an entity to a JSON string.
      */
-    private static function isPropertyNullable(ReflectionProperty $prop): bool
+    public static function toJson(object $entity, int $flags = 0): string
     {
+        return json_encode(
+            self::toArray($entity),
+            $flags | JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES,
+        );
+    }
+
+    // ── Cast Pipeline ──────────────────────────────────────────
+
+    /**
+     * Cast a raw DB value to the appropriate PHP type.
+     */
+    private static function castValue(
+        mixed $val,
+        ReflectionProperty $prop,
+        ?FieldMetadata $fieldMeta,
+        object $entity,
+    ): mixed {
+        if ($val === null) {
+            return null;
+        }
+
+        // 1. Custom #[Cast] takes priority
+        if ($fieldMeta?->castTo !== null) {
+            return self::applyCast($val, $fieldMeta->castTo, $prop, $entity);
+        }
+
+        // 2. Backed enum detection via reflection type
         $type = $prop->getType();
-        if (!$type) return true; // No type hint = nullable
-
-        if ($type instanceof \ReflectionUnionType) {
-            foreach ($type->getTypes() as $unionType) {
-                if ($unionType instanceof \ReflectionNamedType && $unionType->getName() === 'null') {
-                    return true;
-                }
+        if ($type instanceof \ReflectionNamedType && !$type->isBuiltin()) {
+            $typeName = $type->getName();
+            if (is_subclass_of($typeName, \BackedEnum::class)) {
+                return $typeName::from($val);
             }
-            return false;
         }
 
-        if ($type instanceof \ReflectionNamedType) {
-            return $type->allowsNull();
-        }
-
-        return true; // Default to nullable for safety
+        // 3. Raw type coercion
+        return self::coerceType($val, $fieldMeta);
     }
 
     /**
-     * Safely set a property value, respecting nullability constraints
+     * Apply a #[Cast] transformation during hydration.
      */
-    private static function safeSetProperty(ReflectionProperty $prop, object $entity, mixed $value): void
-    {
-        $prop->setAccessible(true);
+    private static function applyCast(
+        mixed $val,
+        string $castTo,
+        ReflectionProperty $prop,
+        object $entity,
+    ): mixed {
+        // Backed enum
+        if (is_subclass_of($castTo, \BackedEnum::class)) {
+            return $castTo::from($val);
+        }
 
-        if ($value === null && !self::isPropertyNullable($prop)) {
-            // Don't set non-nullable properties to null - leave them uninitialized
+        // CastInterface implementation
+        if (is_subclass_of($castTo, CastInterface::class)) {
+            $caster = self::$castInstances[$castTo] ??= new $castTo();
+            return $caster->get($val, $prop->getName(), $entity);
+        }
+
+        // Scalar type cast
+        return match ($castTo) {
+            'int', 'integer'         => (int) $val,
+            'float', 'double'        => (float) $val,
+            'bool', 'boolean'        => (bool) $val,
+            'string'                 => (string) $val,
+            'array'                  => is_string($val) ? json_decode($val, true) ?? [] : (array) $val,
+            'datetime', DateTimeImmutable::class => new DateTimeImmutable((string) $val, new DateTimeZone('UTC')),
+            default                  => $val,
+        };
+    }
+
+    /**
+     * Raw type coercion based on #[Field] type.
+     */
+    private static function coerceType(mixed $val, ?FieldMetadata $fieldMeta): mixed
+    {
+        if ($fieldMeta === null) {
+            return $val;
+        }
+
+        $lc = strtolower($fieldMeta->type);
+
+        return match (true) {
+            // Date/time types
+            in_array($lc, ['datetime', 'datetimeimmutable', 'timestamp', 'timestamptz'], true)
+                => new DateTimeImmutable((string) $val, new DateTimeZone('UTC')),
+            $lc === 'date'
+                => new DateTimeImmutable($val . ' 00:00:00', new DateTimeZone('UTC')),
+            $lc === 'time'
+                => new DateTimeImmutable(date('Y-m-d') . ' ' . $val, new DateTimeZone('UTC')),
+            // Integer types
+            in_array($lc, ['int', 'integer', 'bigint', 'smallint', 'tinyint', 'unsignedbigint'], true)
+                => (int) $val,
+            // Float types (not decimal — decimal stays as string to preserve precision)
+            in_array($lc, ['float', 'double'], true)
+                => is_numeric($val) ? (float) $val : $val,
+            // Decimal: keep as string to avoid floating-point precision loss
+            $lc === 'decimal'
+                => (string) $val,
+            // Boolean
+            in_array($lc, ['bool', 'boolean'], true)
+                => (bool) $val,
+            // JSON
+            in_array($lc, ['json', 'simple_json'], true)
+                => is_string($val) ? (json_decode($val, true) ?? null) : $val,
+            // Array
+            in_array($lc, ['array', 'simple_array'], true)
+                => self::coerceArray($val),
+            // String
+            in_array($lc, ['string', 'text', 'char', 'mediumtext', 'longtext'], true)
+                => (string) $val,
+            default => $val,
+        };
+    }
+
+    /**
+     * Coerce a value to an array from JSON or comma-separated string.
+     */
+    private static function coerceArray(mixed $val): array
+    {
+        if (!is_string($val)) {
+            return (array) $val;
+        }
+
+        $trimmed = trim($val);
+        if ($trimmed !== '' && ($trimmed[0] === '[' || $trimmed[0] === '{')) {
+            $decoded = json_decode($trimmed, true);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                return $decoded;
+            }
+        }
+
+        return $val === '' ? [] : explode(',', $val);
+    }
+
+    // ── De-cast (for extraction) ───────────────────────────────
+
+    /**
+     * Convert a PHP value back to a database-friendly format.
+     */
+    private static function decastValue(mixed $value, ?FieldMetadata $fieldMeta, object $entity): mixed
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        // Custom CastInterface::set() takes priority
+        if ($fieldMeta?->castTo !== null && is_subclass_of($fieldMeta->castTo, CastInterface::class)) {
+            $caster = self::$castInstances[$fieldMeta->castTo] ??= new ($fieldMeta->castTo)();
+            return $caster->set($value, $fieldMeta->name, $entity);
+        }
+
+        return match (true) {
+            $value instanceof \BackedEnum             => $value->value,
+            $value instanceof DateTimeImmutable,
+            $value instanceof \DateTime               => $value->format('Y-m-d H:i:s'),
+            is_bool($value)                           => $value ? 1 : 0,
+            is_float($value)                          => rtrim(rtrim(number_format($value, 14, '.', ''), '0'), '.'),
+            is_array($value)                          => json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            default                                   => $value,
+        };
+    }
+
+    /**
+     * Serialize a value for toArray() output.
+     */
+    private static function serializeValue(mixed $value): mixed
+    {
+        return match (true) {
+            $value instanceof \BackedEnum     => $value->value,
+            $value instanceof DateTimeImmutable,
+            $value instanceof \DateTime       => $value->format('c'),
+            default                           => $value,
+        };
+    }
+
+    // ── Property Assignment ────────────────────────────────────
+
+    /**
+     * Assign a value to a property, using direct assignment for hooked properties.
+     */
+    private static function assignProperty(
+        ReflectionProperty $prop,
+        object $entity,
+        mixed $value,
+        ?FieldMetadata $fieldMeta,
+    ): void {
+        // Null on non-nullable → skip (leave uninitialized)
+        if ($value === null && !self::isNullable($prop)) {
+            return;
+        }
+
+        // Hooked properties → direct assignment (invokes set hook)
+        if ($fieldMeta?->hasHook === true) {
+            $entity->{$prop->getName()} = $value;
             return;
         }
 
         $prop->setValue($entity, $value);
+    }
+
+    /**
+     * Check if a property allows null.
+     */
+    private static function isNullable(ReflectionProperty $prop): bool
+    {
+        $type = $prop->getType();
+
+        if ($type === null) {
+            return true;
+        }
+
+        return $type->allowsNull();
+    }
+
+    // ── Reflection Cache ───────────────────────────────────────
+
+    /**
+     * @param class-string $class
+     *
+     * @return ReflectionClass<object>
+     */
+    private static function reflect(string $class): ReflectionClass
+    {
+        return self::$reflectionCache[$class] ??= new ReflectionClass($class);
+    }
+
+    /**
+     * Clear all caches (primarily for testing).
+     */
+    public static function clearCache(): void
+    {
+        self::$reflectionCache = [];
+        self::$castInstances   = [];
     }
 }
