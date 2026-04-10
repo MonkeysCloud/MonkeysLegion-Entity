@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace MonkeysLegion\Entity\Observers;
 
-use MonkeysLegion\Entity\Attributes\ObservedBy;
+use MonkeysLegion\Entity\Attributes\Subscribe;
 use MonkeysLegion\Entity\Metadata\MetadataRegistry;
 use MonkeysLegion\Entity\Support\EntityEvent;
 use Psr\Container\ContainerInterface;
@@ -29,6 +29,15 @@ final class LifecycleDispatcher
     /** @var array<string, object> Cached observer instances. */
     private static array $observers = [];
 
+    /**
+     * Global subscriber instances registered via registerSubscriber().
+     *
+     * Each entry: ['instance' => object, 'entities' => list<class-string>]
+     *
+     * @var array<string, array{instance: object, entities: list<class-string>}>
+     */
+    private static array $subscribers = [];
+
     /** @var ContainerInterface|null Optional DI container for observer resolution. */
     private static ?ContainerInterface $container = null;
 
@@ -41,7 +50,50 @@ final class LifecycleDispatcher
     }
 
     /**
-     * Dispatch a lifecycle event to the entity's observers.
+     * Register a global subscriber class (decorated with #[Subscribe]).
+     *
+     * Subscribers receive lifecycle events alongside an EntityEvent value
+     * object that carries the full event context, including changed fields.
+     * Unlike per-entity observers, a single subscriber can listen to events
+     * for multiple entity types — or all entities when #[Subscribe] is used
+     * with an empty `entities` list.
+     *
+     * ```php
+     * #[Subscribe(entities: [Order::class])]
+     * class AuditSubscriber {
+     *     public function created(object $entity, EntityEvent $event): void { ... }
+     * }
+     *
+     * LifecycleDispatcher::registerSubscriber(AuditSubscriber::class);
+     * ```
+     *
+     * @param class-string $subscriberClass
+     */
+    public static function registerSubscriber(string $subscriberClass): void
+    {
+        if (isset(self::$subscribers[$subscriberClass])) {
+            return;
+        }
+
+        $instance = self::$container !== null && self::$container->has($subscriberClass)
+            ? self::$container->get($subscriberClass)
+            : new $subscriberClass();
+
+        $ref      = new ReflectionClass($subscriberClass);
+        $entities = [];
+        foreach ($ref->getAttributes(Subscribe::class) as $attr) {
+            $entities = $attr->newInstance()->entities;
+            break;
+        }
+
+        self::$subscribers[$subscriberClass] = [
+            'instance' => $instance,
+            'entities' => $entities,
+        ];
+    }
+
+    /**
+     * Dispatch a lifecycle event to the entity's observers and global subscribers.
      *
      * @param string               $event   Event name (creating, created, etc.)
      * @param object               $entity  The entity instance.
@@ -52,19 +104,34 @@ final class LifecycleDispatcher
         object $entity,
         array $changes = [],
     ): void {
-        $meta = MetadataRegistry::for($entity::class);
+        $meta        = MetadataRegistry::for($entity::class);
         $entityEvent = new EntityEvent(
             event: $event,
             entity: $entity,
             changes: $changes,
         );
 
-        // Per-entity observers (#[ObservedBy])
+        // Per-entity observers (#[ObservedBy]) — receive entity only
         foreach ($meta->observers as $observerClass) {
             $observer = self::resolveObserver($observerClass);
 
             if (method_exists($observer, $event)) {
                 $observer->{$event}($entity);
+            }
+        }
+
+        // Global subscribers (#[Subscribe]) — receive entity + EntityEvent
+        foreach (self::$subscribers as $data) {
+            $entities = $data['entities'];
+            $instance = $data['instance'];
+
+            // Empty entities list means "all entities"
+            if ($entities !== [] && !in_array($entity::class, $entities, true)) {
+                continue;
+            }
+
+            if (method_exists($instance, $event)) {
+                $instance->{$event}($entity, $entityEvent);
             }
         }
     }
@@ -80,12 +147,41 @@ final class LifecycleDispatcher
     }
 
     /**
-     * Clear all cached observers and container reference (primarily for testing).
+     * Inject a pre-built subscriber instance (for testing).
+     *
+     * The entities filter is read from the class's #[Subscribe] attribute;
+     * pass an explicit list to override.
+     *
+     * @param class-string       $subscriberClass
+     * @param list<class-string> $entities Override the entities filter (empty = read from attribute).
+     */
+    public static function setSubscriberInstance(
+        string $subscriberClass,
+        object $instance,
+        array $entities = [],
+    ): void {
+        if ($entities === []) {
+            $ref = new ReflectionClass($subscriberClass);
+            foreach ($ref->getAttributes(Subscribe::class) as $attr) {
+                $entities = $attr->newInstance()->entities;
+                break;
+            }
+        }
+
+        self::$subscribers[$subscriberClass] = [
+            'instance' => $instance,
+            'entities' => $entities,
+        ];
+    }
+
+    /**
+     * Clear all cached observers, subscribers, and container reference (primarily for testing).
      */
     public static function clearObservers(): void
     {
-        self::$observers = [];
-        self::$container = null;
+        self::$observers   = [];
+        self::$subscribers = [];
+        self::$container   = null;
     }
 
     // ── Internal ───────────────────────────────────────────────

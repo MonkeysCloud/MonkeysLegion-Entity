@@ -54,7 +54,16 @@ final class EntityMetadata
         public readonly array $observers = [],
         public readonly array $queryFilters = [],
         public readonly array $changesets = [],
-    ) {}
+    ) {
+        // Pre-compute persistable fields once; reused by Hydrator, ChangeTracker, etc.
+        $this->persistableFieldsCache = array_values(array_filter(
+            array_keys($this->fields),
+            fn(string $name): bool => !in_array($name, $this->virtual, true),
+        ));
+    }
+
+    /** @var list<string> Pre-computed list of persistable field names (excludes virtual). */
+    private readonly array $persistableFieldsCache;
 
     // ── Convenience Accessors ──────────────────────────────────
 
@@ -86,10 +95,7 @@ final class EntityMetadata
      */
     public function persistableFields(): array
     {
-        return array_values(array_filter(
-            array_keys($this->fields),
-            fn(string $name): bool => !in_array($name, $this->virtual, true),
-        ));
+        return $this->persistableFieldsCache;
     }
 
     /**

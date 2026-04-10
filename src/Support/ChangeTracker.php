@@ -31,6 +31,9 @@ final class ChangeTracker
     /** @var SplObjectStorage<object, array<string, mixed>> */
     private SplObjectStorage $originals;
 
+    /** @var array<class-string, \ReflectionClass<object>> */
+    private static array $reflectionCache = [];
+
     public function __construct()
     {
         $this->originals = new SplObjectStorage();
@@ -118,7 +121,7 @@ final class ChangeTracker
     private function snapshot(object $entity): array
     {
         $meta = MetadataRegistry::for($entity::class);
-        $ref  = new ReflectionClass($entity);
+        $ref  = self::$reflectionCache[$entity::class] ??= new ReflectionClass($entity);
         $data = [];
 
         foreach ($meta->persistableFields() as $name) {

@@ -10,6 +10,7 @@ use MonkeysLegion\Entity\Metadata\EntityMetadata;
 use MonkeysLegion\Entity\Metadata\FieldMetadata;
 use MonkeysLegion\Entity\Metadata\MetadataRegistry;
 use MonkeysLegion\Entity\Observers\LifecycleDispatcher;
+use MonkeysLegion\Entity\Utils\Uuid;
 use ReflectionClass;
 use ReflectionProperty;
 
@@ -68,9 +69,23 @@ final class Hydrator
 
             $fieldMeta = $meta->fields[$col] ?? null;
             $prop      = $ref->getProperty($col);
-            $value     = self::castValue($val, $prop, $fieldMeta);
+            $value     = self::castValue($val, $prop, $fieldMeta, $obj);
 
             self::assignProperty($prop, $obj, $value, $fieldMeta);
+        }
+
+        // Auto-generate UUID v4 for any #[Uuid] fields not present in the row
+        foreach ($meta->fields as $name => $fieldMeta) {
+            if (!$fieldMeta->isUuid) {
+                continue;
+            }
+            if (!$ref->hasProperty($name)) {
+                continue;
+            }
+            $prop = $ref->getProperty($name);
+            if (!$prop->isInitialized($obj)) {
+                $prop->setValue($obj, Uuid::v4());
+            }
         }
 
         LifecycleDispatcher::dispatch('hydrated', $obj);
@@ -122,7 +137,7 @@ final class Hydrator
 
             $value     = $prop->getValue($entity);
             $fieldMeta = $meta->fields[$name] ?? null;
-            $data[$name] = self::decastValue($value, $fieldMeta);
+            $data[$name] = self::decastValue($value, $fieldMeta, $entity);
         }
 
         // Auto-inject timestamps
@@ -190,6 +205,7 @@ final class Hydrator
         mixed $val,
         ReflectionProperty $prop,
         ?FieldMetadata $fieldMeta,
+        object $entity,
     ): mixed {
         if ($val === null) {
             return null;
@@ -197,7 +213,7 @@ final class Hydrator
 
         // 1. Custom #[Cast] takes priority
         if ($fieldMeta?->castTo !== null) {
-            return self::applyCast($val, $fieldMeta->castTo, $prop);
+            return self::applyCast($val, $fieldMeta->castTo, $prop, $entity);
         }
 
         // 2. Backed enum detection via reflection type
@@ -220,6 +236,7 @@ final class Hydrator
         mixed $val,
         string $castTo,
         ReflectionProperty $prop,
+        object $entity,
     ): mixed {
         // Backed enum
         if (is_subclass_of($castTo, \BackedEnum::class)) {
@@ -229,7 +246,7 @@ final class Hydrator
         // CastInterface implementation
         if (is_subclass_of($castTo, CastInterface::class)) {
             $caster = self::$castInstances[$castTo] ??= new $castTo();
-            return $caster->get($val, $prop->getName(), new \stdClass());
+            return $caster->get($val, $prop->getName(), $entity);
         }
 
         // Scalar type cast
@@ -310,10 +327,16 @@ final class Hydrator
     /**
      * Convert a PHP value back to a database-friendly format.
      */
-    private static function decastValue(mixed $value, ?FieldMetadata $fieldMeta): mixed
+    private static function decastValue(mixed $value, ?FieldMetadata $fieldMeta, object $entity): mixed
     {
         if ($value === null) {
             return null;
+        }
+
+        // Custom CastInterface::set() takes priority
+        if ($fieldMeta?->castTo !== null && is_subclass_of($fieldMeta->castTo, CastInterface::class)) {
+            $caster = self::$castInstances[$fieldMeta->castTo] ??= new ($fieldMeta->castTo)();
+            return $caster->set($value, $fieldMeta->name, $entity);
         }
 
         return match (true) {

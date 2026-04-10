@@ -72,7 +72,10 @@ final class EntityScanner
     }
 
     /**
-     * Extract a fully-qualified class name from a PHP file path.
+     * Extract a fully-qualified class name from a PHP file using the tokenizer.
+     *
+     * Uses token_get_all() instead of regex so that class declarations inside
+     * comments, strings, or heredocs are never mistakenly matched.
      */
     private static function classFromPath(string $path): ?string
     {
@@ -81,13 +84,56 @@ final class EntityScanner
             return null;
         }
 
-        if (!preg_match('/^namespace\s+(.+?);/m', $contents, $ns)) {
-            return null;
+        $tokens    = token_get_all($contents, TOKEN_PARSE);
+        $namespace = '';
+        $className = null;
+        $count     = count($tokens);
+        $i         = 0;
+
+        while ($i < $count) {
+            $token = $tokens[$i];
+
+            if (!is_array($token)) {
+                $i++;
+                continue;
+            }
+
+            // Capture namespace (supports multi-segment: A\B\C)
+            if ($token[0] === T_NAMESPACE) {
+                $ns = '';
+                $i++;
+                while ($i < $count) {
+                    $t = $tokens[$i];
+                    if (is_array($t) && in_array($t[0], [T_STRING, T_NS_SEPARATOR, T_NAME_QUALIFIED, T_NAME_FULLY_QUALIFIED], true)) {
+                        $ns .= $t[1];
+                    } elseif ($t === '{' || $t === ';') {
+                        break;
+                    }
+                    $i++;
+                }
+                $namespace = trim($ns, '\\');
+                continue;
+            }
+
+            // Capture class name — skip anonymous classes (no T_STRING follows T_CLASS)
+            if ($token[0] === T_CLASS) {
+                $j = $i + 1;
+                while ($j < $count && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
+                    $j++;
+                }
+                if ($j < $count && is_array($tokens[$j]) && $tokens[$j][0] === T_STRING) {
+                    $className = $tokens[$j][1];
+                    break;
+                }
+            }
+
+            $i++;
         }
-        if (!preg_match('/^class\s+(\w+)/m', $contents, $cl)) {
+
+        if ($namespace === '' || $className === null) {
             return null;
         }
 
-        return $ns[1] . '\\' . $cl[1];
+        return $namespace . '\\' . $className;
     }
 }
