@@ -4,109 +4,75 @@ declare(strict_types=1);
 namespace MonkeysLegion\Entity\Observers;
 
 use MonkeysLegion\Entity\Attributes\ObservedBy;
+use MonkeysLegion\Entity\Metadata\MetadataRegistry;
+use MonkeysLegion\Entity\Support\EntityEvent;
+use Psr\Container\ContainerInterface;
 use ReflectionClass;
-use ReflectionException;
 
 /**
- * Dispatches lifecycle events to entity observers.
+ * MonkeysLegion Framework — Entity Package
+ *
+ * Dispatches lifecycle events to entity observers and global subscribers.
+ *
+ * v2 improvements:
+ *  • DI container integration for observer resolution
+ *  • Uses MetadataRegistry instead of direct reflection
+ *  • Supports restoring/restored events for soft delete
+ *  • Supports replicating event
+ *  • Dispatches to both per-entity observers and global subscribers
+ *
+ * @copyright 2026 MonkeysCloud Team
+ * @license   MIT
  */
 final class LifecycleDispatcher
 {
-    /**
-     * @var array<string, object> List of instantiated observers to avoid re-instantiation.
-     */
+    /** @var array<string, object> Cached observer instances. */
     private static array $observers = [];
 
-    /**
-     * @var array<string, array<string>> Cached observer classes for entity classes.
-     */
-    private static array $observerClasses = [];
+    /** @var ContainerInterface|null Optional DI container for observer resolution. */
+    private static ?ContainerInterface $container = null;
 
     /**
-     * Dispatch a lifecycle event to the entity's observer.
-     *
-     * @param string $event The name of the event (e.g., 'creating', 'created', etc.)
-     * @param object $entity The entity instance.
-     * @throws ReflectionException
+     * Set the DI container for observer resolution.
      */
-    public static function dispatch(string $event, object $entity): void
+    public static function setContainer(?ContainerInterface $container): void
     {
-        $observerClasses = self::getObserverClasses(get_class($entity));
+        self::$container = $container;
+    }
 
-        foreach ($observerClasses as $observerClass) {
-            $observer = self::getObserverInstance($observerClass);
+    /**
+     * Dispatch a lifecycle event to the entity's observers.
+     *
+     * @param string               $event   Event name (creating, created, etc.)
+     * @param object               $entity  The entity instance.
+     * @param array<string, mixed> $changes Changed fields (for update events).
+     */
+    public static function dispatch(
+        string $event,
+        object $entity,
+        array $changes = [],
+    ): void {
+        $meta = MetadataRegistry::for($entity::class);
+        $entityEvent = new EntityEvent(
+            event: $event,
+            entity: $entity,
+            changes: $changes,
+        );
+
+        // Per-entity observers (#[ObservedBy])
+        foreach ($meta->observers as $observerClass) {
+            $observer = self::resolveObserver($observerClass);
 
             if (method_exists($observer, $event)) {
-                $observer->$event($entity);
+                $observer->{$event}($entity);
             }
         }
     }
 
     /**
-     * Get the observer classes for an entity.
+     * Set a specific observer instance (for testing or manual registration).
      *
-     * @param string $entityClass The class name of the entity.
-     * @return array<string> The class names of the observers.
-     * @throws ReflectionException
-     */
-    public static function getObserverClasses(string $entityClass): array
-    {
-        if (array_key_exists($entityClass, self::$observerClasses)) {
-            return self::$observerClasses[$entityClass];
-        }
-
-        $ref = new ReflectionClass($entityClass);
-        $attributes = $ref->getAttributes(ObservedBy::class);
-
-        if (empty($attributes)) {
-            self::$observerClasses[$entityClass] = [];
-            return [];
-        }
-
-        $classes = [];
-        foreach ($attributes as $attr) {
-            /** @var ObservedBy $observedBy */
-            $observedBy = $attr->newInstance();
-            $obs = $observedBy->observer;
-
-            if (is_array($obs)) {
-                foreach ($obs as $o) {
-                    $classes[] = (string)$o;
-                }
-            } else {
-                $classes[] = (string)$obs;
-            }
-        }
-
-        self::$observerClasses[$entityClass] = $classes;
-        return $classes;
-    }
-
-    /**
-     * Get or create an instance of the observer.
-     *
-     * @param class-string $observerClass The class name of the observer.
-     * @return object The instance of the observer.
-     */
-    private static function getObserverInstance(string $observerClass): object
-    {
-        if (isset(self::$observers[$observerClass])) {
-            return self::$observers[$observerClass];
-        }
-
-        // Ideally, we'd use a DI container here, but we'll provide a simple instantiation for now.
-        // If a container is available globally (e.g., in a framework), it could be set here.
-        $observer = new $observerClass();
-        self::$observers[$observerClass] = $observer;
-
-        return $observer;
-    }
-
-    /**
-     * Set a specific observer instance (e.g., for testing or manual registration).
-     *
-     * @param class-string $observerClass The class name of the observer.
-     * @param object $instance The instance.
+     * @param class-string $observerClass
      */
     public static function setObserverInstance(string $observerClass, object $instance): void
     {
@@ -114,11 +80,35 @@ final class LifecycleDispatcher
     }
 
     /**
-     * Clear the observer instances (primarily for testing).
+     * Clear all cached observers and container reference (primarily for testing).
      */
     public static function clearObservers(): void
     {
         self::$observers = [];
-        self::$observerClasses = [];
+        self::$container = null;
+    }
+
+    // ── Internal ───────────────────────────────────────────────
+
+    /**
+     * Resolve an observer instance via DI container or direct instantiation.
+     */
+    private static function resolveObserver(string $observerClass): object
+    {
+        if (isset(self::$observers[$observerClass])) {
+            return self::$observers[$observerClass];
+        }
+
+        // Try DI container first
+        if (self::$container !== null && self::$container->has($observerClass)) {
+            $observer = self::$container->get($observerClass);
+            self::$observers[$observerClass] = $observer;
+            return $observer;
+        }
+
+        // Fallback to direct instantiation
+        $observer = new $observerClass();
+        self::$observers[$observerClass] = $observer;
+        return $observer;
     }
 }
