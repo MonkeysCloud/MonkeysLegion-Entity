@@ -1084,14 +1084,13 @@ final class EntityV2Test extends TestCase
     #[Test]
     public function lifecycle_dispatcher_register_subscriber_reads_attribute(): void
     {
+        $this->expectNotToPerformAssertions();
+
         LifecycleDispatcher::registerSubscriber(TestAuditSubscriber::class);
 
         // Dispatch to a different entity; subscriber should NOT fire (attribute restricts to ObservedEntity)
         $user = new UserEntity();
         $user->id = 99;
         LifecycleDispatcher::dispatch('created', $user);
-
-        // No exception means entity-filter works correctly
-        $this->assertTrue(true);
     }
 }
