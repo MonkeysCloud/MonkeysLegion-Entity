@@ -225,6 +225,48 @@ class ArticleEntity
     public string $slug;
 }
 
+// Entity without explicit table name — tests auto-naming
+#[Entity]
+class BlogPostEntity
+{
+    #[Id]
+    #[Field(type: 'unsignedBigInt', autoIncrement: true)]
+    public int $id;
+
+    #[Field(type: 'string')]
+    public string $title;
+}
+
+// Entity with #[Column(name: ...)] — tests column→property mapping
+use MonkeysLegion\Entity\Attributes\Column;
+
+#[Entity(table: 'customers')]
+class CustomerEntity
+{
+    #[Id]
+    #[Field(type: 'unsignedBigInt', autoIncrement: true)]
+    public int $id;
+
+    #[Column(name: 'customer_email')]
+    #[Field(type: 'string', length: 255)]
+    #[Fillable]
+    public string $email;
+
+    #[Column(name: 'full_name')]
+    #[Field(type: 'string', length: 255)]
+    #[Fillable]
+    public string $name;
+
+    #[Field(type: 'integer')]
+    public int $age;
+}
+
+// Class without #[Subscribe] — tests registerSubscriber validation
+class InvalidSubscriber
+{
+    public function created(object $entity): void {}
+}
+
 // ── Test Observer ──────────────────────────────────────────────
 
 class TestUserObserver
@@ -939,9 +981,14 @@ final class EntityV2Test extends TestCase
     #[Test]
     public function metadata_auto_generates_table_from_class_name(): void
     {
-        // ArticleEntity has no explicit table name
-        // But it has #[Entity(table: 'articles')] — let's test with a class
-        // that uses the auto-naming. UserEntity has explicit table.
+        // BlogPostEntity has no explicit table — MetadataRegistry should auto-generate it
+        $meta = MetadataRegistry::for(BlogPostEntity::class);
+        $this->assertSame('blog_post_entitys', $meta->table);
+    }
+
+    #[Test]
+    public function metadata_explicit_table_name_overrides_auto(): void
+    {
         $meta = MetadataRegistry::for(UserEntity::class);
         $this->assertSame('users', $meta->table);
     }
@@ -974,11 +1021,10 @@ final class EntityV2Test extends TestCase
     // ── UUID Auto-generation Tests ─────────────────────────────
 
     #[Test]
-    public function hydrator_auto_generates_uuid_when_absent_from_row(): void
+    public function create_auto_generates_uuid_when_absent(): void
     {
-        $event = Hydrator::hydrate(EventEntity::class, [
+        $event = Hydrator::create(EventEntity::class, [
             'name' => 'Test Event',
-            // 'id' intentionally omitted
         ]);
 
         $this->assertIsString($event->id);
@@ -986,16 +1032,29 @@ final class EntityV2Test extends TestCase
     }
 
     #[Test]
-    public function hydrator_does_not_overwrite_provided_uuid(): void
+    public function create_does_not_overwrite_provided_uuid(): void
     {
         $given = '550e8400-e29b-41d4-a716-446655440000';
 
-        $event = Hydrator::hydrate(EventEntity::class, [
+        $event = Hydrator::create(EventEntity::class, [
             'id'   => $given,
             'name' => 'Test Event',
         ]);
 
         $this->assertSame($given, $event->id);
+    }
+
+    #[Test]
+    public function hydrate_does_not_auto_generate_uuid(): void
+    {
+        // hydrate() should NOT generate UUID — that's for create() only
+        // Partial rows (projection queries) must not get random PKs
+        $event = Hydrator::hydrate(EventEntity::class, [
+            'id'   => '550e8400-e29b-41d4-a716-446655440000',
+            'name' => 'Test Event',
+        ]);
+
+        $this->assertSame('550e8400-e29b-41d4-a716-446655440000', $event->id);
     }
 
     // ── CastInterface::set() Tests ─────────────────────────────
@@ -1092,5 +1151,100 @@ final class EntityV2Test extends TestCase
         $user = new UserEntity();
         $user->id = 99;
         LifecycleDispatcher::dispatch('created', $user);
+    }
+
+    #[Test]
+    public function lifecycle_dispatcher_register_subscriber_requires_attribute(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/must be decorated with #\[Subscribe\]/');
+
+        LifecycleDispatcher::registerSubscriber(InvalidSubscriber::class);
+    }
+
+    // ── Column Mapping Tests ───────────────────────────────────
+
+    #[Test]
+    public function hydrate_maps_db_column_to_property_name(): void
+    {
+        $customer = Hydrator::hydrate(CustomerEntity::class, [
+            'id'             => 1,
+            'customer_email' => 'alice@example.com',
+            'full_name'      => 'Alice',
+            'age'            => 30,
+        ]);
+
+        $this->assertSame('alice@example.com', $customer->email);
+        $this->assertSame('Alice', $customer->name);
+        $this->assertSame(30, $customer->age);
+    }
+
+    #[Test]
+    public function extract_uses_db_column_names_as_keys(): void
+    {
+        $customer = new CustomerEntity();
+        $customer->id    = 1;
+        $customer->email = 'bob@example.com';
+        $customer->name  = 'Bob';
+        $customer->age   = 25;
+
+        $data = Hydrator::extract($customer);
+
+        $this->assertArrayHasKey('customer_email', $data);
+        $this->assertArrayHasKey('full_name', $data);
+        $this->assertSame('bob@example.com', $data['customer_email']);
+        $this->assertSame('Bob', $data['full_name']);
+    }
+
+    #[Test]
+    public function column_to_property_map_returns_only_aliased(): void
+    {
+        $meta = MetadataRegistry::for(CustomerEntity::class);
+        $map  = $meta->columnToPropertyMap();
+
+        $this->assertSame('email', $map['customer_email']);
+        $this->assertSame('name', $map['full_name']);
+        $this->assertArrayNotHasKey('age', $map); // not aliased
+        $this->assertArrayNotHasKey('id', $map);  // not aliased
+    }
+
+    // ── Decimal Precision Test ─────────────────────────────────
+
+    #[Test]
+    public function hydrate_decimal_stays_as_string(): void
+    {
+        $order = Hydrator::hydrate(OrderEntity::class, [
+            'id'       => 1,
+            'status'   => 'pending',
+            'subtotal' => '99.99',
+            'tax'      => '8.50',
+            'version'  => 1,
+            'metadata' => '{}',
+        ]);
+
+        // Decimal fields must remain as string to preserve precision
+        $this->assertIsString($order->subtotal);
+        $this->assertSame('99.99', $order->subtotal);
+        $this->assertIsString($order->tax);
+        $this->assertSame('8.50', $order->tax);
+    }
+
+    #[Test]
+    public function extract_preserves_float_precision(): void
+    {
+        // Verify decastValue outputs stable string for float values
+        $order = new OrderEntity();
+        $order->id       = 1;
+        $order->status   = OrderStatus::Pending;
+        $order->subtotal = '100.00';
+        $order->tax      = '8.50';
+        $order->version  = 1;
+        $order->metadata = [];
+
+        $data = Hydrator::extract($order);
+
+        // Decimal stays string → passes through unchanged
+        $this->assertSame('100.00', $data['subtotal']);
+        $this->assertSame('8.50', $data['tax']);
     }
 }

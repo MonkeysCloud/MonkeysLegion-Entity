@@ -75,16 +75,21 @@ final class LifecycleDispatcher
             return;
         }
 
+        $ref      = new ReflectionClass($subscriberClass);
+        $attrList = $ref->getAttributes(Subscribe::class);
+
+        if ($attrList === []) {
+            throw new \InvalidArgumentException(sprintf(
+                'Class "%s" must be decorated with #[Subscribe] to be registered as a subscriber.',
+                $subscriberClass,
+            ));
+        }
+
         $instance = self::$container !== null && self::$container->has($subscriberClass)
             ? self::$container->get($subscriberClass)
             : new $subscriberClass();
 
-        $ref      = new ReflectionClass($subscriberClass);
-        $entities = [];
-        foreach ($ref->getAttributes(Subscribe::class) as $attr) {
-            $entities = $attr->newInstance()->entities;
-            break;
-        }
+        $entities = $attrList[0]->newInstance()->entities;
 
         self::$subscribers[$subscriberClass] = [
             'instance' => $instance,

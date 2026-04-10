@@ -62,24 +62,57 @@ final class Hydrator
             $row = (array) $row;
         }
 
+        // Build column→property map for #[Column(name: ...)] support
+        $columnMap = $meta->columnToPropertyMap();
+
         foreach ($row as $col => $val) {
-            if (!$ref->hasProperty($col)) {
+            // Resolve DB column name to PHP property name
+            $propName = $columnMap[$col] ?? $col;
+
+            if (!$ref->hasProperty($propName)) {
                 continue;
             }
 
-            $fieldMeta = $meta->fields[$col] ?? null;
-            $prop      = $ref->getProperty($col);
+            $fieldMeta = $meta->fields[$propName] ?? null;
+            $prop      = $ref->getProperty($propName);
             $value     = self::castValue($val, $prop, $fieldMeta, $obj);
 
             self::assignProperty($prop, $obj, $value, $fieldMeta);
         }
 
-        // Auto-generate UUID v4 for any #[Uuid] fields not present in the row
-        foreach ($meta->fields as $name => $fieldMeta) {
-            if (!$fieldMeta->isUuid) {
+        LifecycleDispatcher::dispatch('hydrated', $obj);
+
+        return $obj;
+    }
+
+    /**
+     * Create a new entity instance with optional data and UUID auto-generation.
+     *
+     * Unlike hydrate(), this method generates UUID values for uninitialized
+     * #[Uuid] fields — designed for INSERT flows, not DB row hydration.
+     *
+     * @param class-string         $class
+     * @param array<string, mixed> $data Optional initial data.
+     */
+    public static function create(string $class, array $data = []): object
+    {
+        $ref  = self::reflect($class);
+        $meta = MetadataRegistry::for($class);
+        $obj  = $ref->newInstanceWithoutConstructor();
+
+        // Assign provided data
+        foreach ($data as $name => $val) {
+            if (!$ref->hasProperty($name)) {
                 continue;
             }
-            if (!$ref->hasProperty($name)) {
+            $fieldMeta = $meta->fields[$name] ?? null;
+            $prop      = $ref->getProperty($name);
+            self::assignProperty($prop, $obj, $val, $fieldMeta);
+        }
+
+        // Auto-generate UUID v4 for uninitialized #[Uuid] fields
+        foreach ($meta->fields as $name => $fieldMeta) {
+            if (!$fieldMeta->isUuid || !$ref->hasProperty($name)) {
                 continue;
             }
             $prop = $ref->getProperty($name);
@@ -88,7 +121,7 @@ final class Hydrator
             }
         }
 
-        LifecycleDispatcher::dispatch('hydrated', $obj);
+        LifecycleDispatcher::dispatch('creating', $obj);
 
         return $obj;
     }
@@ -137,7 +170,10 @@ final class Hydrator
 
             $value     = $prop->getValue($entity);
             $fieldMeta = $meta->fields[$name] ?? null;
-            $data[$name] = self::decastValue($value, $fieldMeta, $entity);
+
+            // Use DB column name as key when #[Column(name: ...)] is set
+            $key         = $fieldMeta?->columnName ?? $name;
+            $data[$key]  = self::decastValue($value, $fieldMeta, $entity);
         }
 
         // Auto-inject timestamps
@@ -283,9 +319,12 @@ final class Hydrator
             // Integer types
             in_array($lc, ['int', 'integer', 'bigint', 'smallint', 'tinyint', 'unsignedbigint'], true)
                 => (int) $val,
-            // Float types
-            in_array($lc, ['float', 'double', 'decimal'], true)
+            // Float types (not decimal — decimal stays as string to preserve precision)
+            in_array($lc, ['float', 'double'], true)
                 => is_numeric($val) ? (float) $val : $val,
+            // Decimal: keep as string to avoid floating-point precision loss
+            $lc === 'decimal'
+                => (string) $val,
             // Boolean
             in_array($lc, ['bool', 'boolean'], true)
                 => (bool) $val,
@@ -344,6 +383,7 @@ final class Hydrator
             $value instanceof DateTimeImmutable,
             $value instanceof \DateTime               => $value->format('Y-m-d H:i:s'),
             is_bool($value)                           => $value ? 1 : 0,
+            is_float($value)                          => rtrim(rtrim(number_format($value, 14, '.', ''), '0'), '.'),
             is_array($value)                          => json_encode($value, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
             default                                   => $value,
         };

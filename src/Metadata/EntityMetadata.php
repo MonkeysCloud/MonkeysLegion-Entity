@@ -60,10 +60,23 @@ final class EntityMetadata
             array_keys($this->fields),
             fn(string $name): bool => !in_array($name, $this->virtual, true),
         ));
+
+        // Pre-compute column→property map for #[Column(name: ...)] support.
+        // Only includes fields where columnName differs from property name.
+        $map = [];
+        foreach ($this->fields as $name => $field) {
+            if ($field->columnName !== null && $field->columnName !== $name) {
+                $map[$field->columnName] = $name;
+            }
+        }
+        $this->columnPropertyMap = $map;
     }
 
     /** @var list<string> Pre-computed list of persistable field names (excludes virtual). */
     private readonly array $persistableFieldsCache;
+
+    /** @var array<string, string> DB column name → PHP property name (only for aliased columns). */
+    private readonly array $columnPropertyMap;
 
     // ── Convenience Accessors ──────────────────────────────────
 
@@ -96,6 +109,16 @@ final class EntityMetadata
     public function persistableFields(): array
     {
         return $this->persistableFieldsCache;
+    }
+
+    /**
+     * Get the DB column→property map for aliased columns.
+     *
+     * @return array<string, string> DB column name → PHP property name.
+     */
+    public function columnToPropertyMap(): array
+    {
+        return $this->columnPropertyMap;
     }
 
     /**

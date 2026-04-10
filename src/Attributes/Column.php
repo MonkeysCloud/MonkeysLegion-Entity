@@ -8,17 +8,20 @@ use Attribute;
 /**
  * MonkeysLegion Framework — Entity Package
  *
- * Annotate a property with explicit column metadata.
+ * Map a PHP property to a database column with a different name.
  *
- * Use this when the database column name differs from the PHP property
- * name, or to specify SQL-level type overrides.
+ * When the database column name differs from the PHP property name,
+ * use #[Column] to define the mapping. The Hydrator and extract()
+ * methods use this to translate between DB rows and entity properties.
+ *
+ * For type, length, and nullable configuration, use #[Field] instead.
  *
  * ```php
  * #[Entity(table: 'users')]
  * class User {
  *     #[Column(name: 'user_email')]
  *     #[Field(type: 'string', length: 255)]
- *     public string $email;
+ *     public string $email;  // DB column = user_email, PHP prop = email
  * }
  * ```
  *
@@ -28,10 +31,10 @@ use Attribute;
 #[Attribute(Attribute::TARGET_PROPERTY)]
 final class Column
 {
+    /**
+     * @param string $name The database column name.
+     */
     public function __construct(
-        public readonly ?string $name = null,
-        public readonly ?string $type = null,
-        public readonly ?int $length = null,
-        public readonly bool $nullable = false,
+        public readonly string $name,
     ) {}
 }
