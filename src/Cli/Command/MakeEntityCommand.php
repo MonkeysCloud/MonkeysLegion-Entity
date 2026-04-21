@@ -4,19 +4,19 @@ declare(strict_types=1);
 
 namespace MonkeysLegion\Entity\Cli\Command;
 
-use MonkeysLegion\Cli\Config\EntityConfig;
 use MonkeysLegion\Cli\Console\Attributes\Command as CommandAttr;
 use MonkeysLegion\Cli\Console\Command;
 use MonkeysLegion\Entity\Attributes\JoinTable;
 use Doctrine\Inflector\Inflector;
 use Doctrine\Inflector\InflectorFactory;
-use MonkeysLegion\Cli\Config\FieldType;
-use MonkeysLegion\Cli\Config\PhpTypeMap;
-use MonkeysLegion\Cli\Config\RelationInverseMap;
-use MonkeysLegion\Cli\Config\RelationKeywordMap;
-use MonkeysLegion\Cli\Config\RelationKind;
 use MonkeysLegion\Cli\Helpers\Identifier;
-use MonkeysLegion\Cli\Service\ClassManipulator;
+use MonkeysLegion\Entity\Config\EntityConfig;
+use MonkeysLegion\Entity\Config\FieldType;
+use MonkeysLegion\Entity\Config\PhpTypeMap;
+use MonkeysLegion\Entity\Config\RelationInverseMap;
+use MonkeysLegion\Entity\Config\RelationKeywordMap;
+use MonkeysLegion\Entity\Config\RelationKind;
+use MonkeysLegion\Entity\Service\ClassManipulator;
 use PhpParser\ParserFactory;
 use PhpParser\NodeFinder;
 
